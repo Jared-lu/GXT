@@ -1,4 +1,4 @@
-package internal
+package heap
 
 import (
 	"errors"
@@ -17,13 +17,13 @@ type Heap[T any] struct {
 // 正常的 Comparator src < dst return -1，生成小根堆
 // 利用规则反转，即Comparator src < dst return 1时，可以生成大根堆
 func NewHeap[T any](data []T, comparator GXT.Comparator[T]) *Heap[T] {
-	m := &Heap[T]{comparator: comparator, data: data}
-	// 通过倒序遍历来建堆，从子树开始，不断往上调整更大的子树
-	for i := m.parent(len(m.data) - 1); i >= 0; i-- {
+	heap := &Heap[T]{data: data, comparator: comparator}
+	// 通过倒序遍历来建堆，不断往上调整更大的子树
+	for i := heap.parent(len(heap.data) - 1); i >= 0; i-- {
 		// 堆化除叶节点以外的其他所有节点
-		m.siftDown(i)
+		heap.siftDown(i)
 	}
-	return m
+	return heap
 }
 
 func (h *Heap[T]) Push(ele T) {
@@ -43,7 +43,7 @@ func (h *Heap[T]) Pop() (T, error) {
 	return val, nil
 }
 
-// Peek 返回堆顶
+// Peek 返回堆顶元素
 func (h *Heap[T]) Peek() (T, error) {
 	if len(h.data) == 0 {
 		var t T

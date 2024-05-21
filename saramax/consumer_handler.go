@@ -26,6 +26,7 @@ func (h *Handler[T]) ConsumeClaim(session sarama.ConsumerGroupSession, claim sar
 		if err != nil {
 			continue
 		}
+		// 是否重试与重试次数使用Option模式让用户决定
 		for i := 0; i < 3; i++ {
 			err = h.fn(msg, t)
 			if err == nil {
