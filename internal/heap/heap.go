@@ -32,7 +32,7 @@ func (h *Heap[T]) Push(ele T) {
 }
 
 func (h *Heap[T]) Pop() (T, error) {
-	if len(h.data) == 0 {
+	if h.isEmpty() {
 		var t T
 		return t, ErrEmptyHeap
 	}
@@ -45,7 +45,7 @@ func (h *Heap[T]) Pop() (T, error) {
 
 // Peek 返回堆顶元素
 func (h *Heap[T]) Peek() (T, error) {
-	if len(h.data) == 0 {
+	if h.isEmpty() {
 		var t T
 		return t, ErrEmptyHeap
 	}
@@ -56,7 +56,7 @@ func (h *Heap[T]) Size() int {
 	return len(h.data)
 }
 
-func (h *Heap[T]) IsEmpty() bool {
+func (h *Heap[T]) isEmpty() bool {
 	return len(h.data) == 0
 }
 
