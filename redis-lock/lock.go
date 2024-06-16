@@ -17,6 +17,9 @@ var (
 //go:embed lua/unlock.lua
 var luaUnlock string
 
+//go:embed lua/refresh.lua
+var luaRefresh string
+
 type Client struct {
 	client redis.Cmdable
 }
@@ -40,21 +43,80 @@ func (c *Client) TryLock(ctx context.Context,
 	}
 
 	return &Lock{
-		client: c.client,
-		key:    key,
-		value:  val,
+		client:     c.client,
+		key:        key,
+		value:      val,
+		expiration: expiration,
 	}, nil
 }
 
 type Lock struct {
 	client redis.Cmdable
 	// key + value 才是锁的唯一标识
-	key   string
-	value string
+	key        string
+	value      string
+	expiration time.Duration
+	unlockChan chan struct{}
+}
+
+// AutoRefresh 不建议使用这个API，用户最好是自己手动控制Refresh
+// interval 多久续约一次
+// timeout 调用续约的超时时间
+func (l *Lock) AutoRefresh(interval time.Duration, timeout time.Duration) error {
+	timeoutChan := make(chan struct{}, 1)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.unlockChan:
+			// 用户主动释放锁
+			return nil
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			err := l.Refresh(ctx)
+			cancel()
+			switch {
+			// 处理error
+			case errors.Is(err, context.DeadlineExceeded):
+				// 自己给自己发信号，channel一定要带缓存的
+				timeoutChan <- struct{}{}
+				continue
+			case err == nil:
+			default:
+				return err
+			}
+		case <-timeoutChan:
+			// 尝试一次重试
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			err := l.Refresh(ctx)
+			cancel()
+			if err == nil {
+				// 重试成功
+				continue
+			}
+			return err
+		}
+	}
+}
+
+// Refresh 用户手动续约
+func (l *Lock) Refresh(ctx context.Context) error {
+	res, err := l.client.Eval(ctx, luaRefresh, []string{l.key}, l.value, l.expiration.Seconds()).Int64()
+	if err != nil {
+		return err
+	}
+	if res != 1 {
+		// 不是自己的锁
+		return ErrLockNotHeld
+	}
+	return nil
 }
 
 func (l *Lock) Unlock(ctx context.Context) error {
 	res, err := l.client.Eval(ctx, luaUnlock, []string{l.key}, l.value).Int64()
+	defer func() {
+		close(l.unlockChan)
+	}()
 	if err != nil {
 		return err
 	}
