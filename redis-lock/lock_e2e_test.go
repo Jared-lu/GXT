@@ -4,6 +4,7 @@ package redis_lock
 
 import (
 	"context"
+	"fmt"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,7 +12,129 @@ import (
 	"time"
 )
 
-func Test_e2e_TyLock(t *testing.T) {
+func Test_e2e_Lock(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+	testCases := []struct {
+		name       string
+		before     func(t *testing.T)
+		after      func(t *testing.T)
+		key        string
+		expiration time.Duration
+		timeout    time.Duration
+		retry      RetryStrategy
+		wantErr    error
+		wantLock   *Lock
+	}{
+		{
+			name: "加锁成功",
+			before: func(t *testing.T) {
+
+			},
+			after: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+				defer cancel()
+				time.Sleep(time.Second * 2)
+				timeout, err := rdb.TTL(ctx, "lock-key1").Result()
+				require.NoError(t, err)
+				require.True(t, timeout >= time.Second*50)
+				_, err = rdb.Del(ctx, "lock-key1").Result()
+				require.NoError(t, err)
+			},
+			key:        "lock-key1",
+			expiration: time.Minute,
+			timeout:    time.Second * 3,
+			retry:      nil,
+			wantErr:    nil,
+			wantLock: &Lock{
+				key:        "lock-key1",
+				expiration: time.Minute,
+				client:     rdb,
+			},
+		},
+		{
+			name: "重试成功",
+			before: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				res, err := rdb.Set(ctx, "lock-key3", "not my key", time.Second*3).Result()
+				require.NoError(t, err)
+				require.Equal(t, "OK", res)
+			},
+			after: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+				defer cancel()
+				timeout, err := rdb.TTL(ctx, "lock-key3").Result()
+				require.NoError(t, err)
+				require.True(t, timeout >= time.Second*50)
+				_, err = rdb.Del(ctx, "lock-key3").Result()
+				require.NoError(t, err)
+			},
+			key:        "lock-key3",
+			expiration: time.Minute,
+			timeout:    time.Second * 3,
+			retry: &FixedIntervalRetryStrategy{
+				Interval: time.Second,
+				MaxCnt:   5,
+			},
+			wantErr: nil,
+			wantLock: &Lock{
+				key:        "lock-key3",
+				expiration: time.Minute,
+				client:     rdb,
+			},
+		},
+		{
+			name: "重试超过了上限",
+			before: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				res, err := rdb.Set(ctx, "lock-key4", "not my key", time.Minute).Result()
+				require.NoError(t, err)
+				require.Equal(t, "OK", res)
+			},
+			after: func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+				defer cancel()
+				res, err := rdb.GetDel(ctx, "lock-key4").Result()
+				require.NoError(t, err)
+				require.Equal(t, "not my key", res)
+			},
+			key:        "lock-key4",
+			expiration: time.Minute,
+			timeout:    time.Second * 3,
+			retry: &FixedIntervalRetryStrategy{
+				Interval: time.Second,
+				MaxCnt:   5,
+			},
+			wantErr: fmt.Errorf("超出重试限制, %w", ErrFailedToPreemptLock),
+			wantLock: &Lock{
+				key:        "lock-key4",
+				expiration: time.Minute,
+				client:     rdb,
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.before(t)
+			client := NewClient(rdb)
+			lock, err := client.Lock(context.Background(), tc.key, tc.expiration, tc.timeout, tc.retry)
+			assert.Equal(t, tc.wantErr, err)
+			if err != nil {
+				return
+			}
+			assert.Equal(t, tc.wantLock.key, lock.key)
+			assert.Equal(t, tc.wantLock.expiration, lock.expiration)
+			assert.NotEmpty(t, lock.value)
+			assert.NotNil(t, lock.client)
+			tc.after(t)
+		})
+	}
+}
+
+func Test_e2e_TryLock(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 	})

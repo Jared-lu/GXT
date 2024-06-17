@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"time"
@@ -20,12 +21,57 @@ var luaUnlock string
 //go:embed lua/refresh.lua
 var luaRefresh string
 
+//go:embed lua/lock.lua
+var luaLock string
+
 type Client struct {
 	client redis.Cmdable
 }
 
 func NewClient(client redis.Cmdable) *Client {
 	return &Client{client: client}
+}
+
+func (c *Client) Lock(ctx context.Context, key string,
+	expiration time.Duration, timeout time.Duration, retry RetryStrategy) (*Lock, error) {
+	var ticker *time.Ticker
+	val := uuid.New().String()
+	for {
+		ctx2, cancel := context.WithTimeout(ctx, timeout)
+		res, err := c.client.Eval(ctx2, luaLock, []string{key}, val, expiration.Seconds()).Int64()
+		cancel()
+		if err != nil || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+
+		if res == 1 {
+			return &Lock{
+				client:     c.client,
+				key:        key,
+				value:      val,
+				expiration: expiration,
+				unlockChan: make(chan struct{}, 1),
+			}, nil
+		}
+
+		// 这里要执行重试
+		// 我怎么知道还能不能重试，怎么重试，重试间隔是多久？
+		// 调用方传入RetryStrategy来决定重试策略
+		interval, ok := retry.Next()
+		if !ok {
+			return nil, fmt.Errorf("超出重试限制, %w", ErrFailedToPreemptLock)
+		}
+		if ticker == nil {
+			ticker = time.NewTicker(interval)
+		} else {
+			ticker.Reset(interval)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 func (c *Client) TryLock(ctx context.Context,
@@ -47,6 +93,7 @@ func (c *Client) TryLock(ctx context.Context,
 		key:        key,
 		value:      val,
 		expiration: expiration,
+		unlockChan: make(chan struct{}, 1),
 	}, nil
 }
 
